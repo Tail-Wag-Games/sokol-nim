@@ -8127,9 +8127,7 @@ _SOKOL_PRIVATE void _sg_gl_apply_bindings(
                 const GLenum gl_tgt = img->gl.target;
                 const GLuint gl_tex = img->gl.tex[img->cmn.active_slot];
                 const GLuint gl_smp = smp->gl.smp;
-
-                SOKOL_ASSERT((gl_shd_img->gl_tex_slot != -1) && gl_tex);
-                _sg_gl_cache_bind_texture_sampler(gl_shd_img->gl_tex_slot, img->gl.target, gl_tex);
+                _sg_gl_cache_bind_texture_sampler(gl_tex_slot, gl_tgt, gl_tex, gl_smp);
                 if (img->cmn.render_target && (img->cmn.num_mipmaps > 1)) {
                     if (img->cmn.upd_frame_index != _sg.frame_index) {
                         glGenerateMipmap(GL_TEXTURE_2D);

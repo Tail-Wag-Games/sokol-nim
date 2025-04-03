@@ -3713,6 +3713,7 @@ typedef struct sg_buffer_info {
     sg_slot_info slot;              // resource pool slot info
     uint32_t update_frame_index;    // frame index of last sg_update_buffer()
     uint32_t append_frame_index;    // frame index of last sg_append_buffer()
+    uint32_t map_frame_index;
     int append_pos;                 // current position in buffer for sg_append_buffer()
     bool append_overflow;           // is buffer in overflow state (due to sg_append_buffer)
     int num_slots;                  // number of renaming-slots for dynamically updated buffers
@@ -4595,6 +4596,11 @@ SOKOL_GFX_API_DECL void sg_disable_frame_stats(void);
 SOKOL_GFX_API_DECL bool sg_frame_stats_enabled(void);
 SOKOL_GFX_API_DECL sg_frame_stats sg_query_frame_stats(void);
 
+SOKOL_GFX_API_DECL void sg_map_buffer(sg_buffer buf_id, int offset, const void* data, int num_bytes);
+SOKOL_GFX_API_DECL void sg_set_buffer_used_frame(uint32_t buf_id, int64_t used_frame);
+SOKOL_GFX_API_DECL void sg_set_image_used_frame(uint32_t img_id, int64_t used_frame);
+SOKOL_GFX_API_DECL void sg_set_pipeline_used_frame(uint32_t pip_id, int64_t used_frame);
+
 /* Backend-specific structs and functions, these may come in handy for mixing
    sokol-gfx rendering with 'native backend' rendering functions.
 
@@ -5456,8 +5462,10 @@ typedef struct {
     bool append_overflow;
     uint32_t update_frame_index;
     uint32_t append_frame_index;
+    uint32_t map_frame_index;
     int num_slots;
     int active_slot;
+    int64_t used_frame;
     sg_buffer_type type;
     sg_usage usage;
 } _sg_buffer_common_t;
@@ -5468,6 +5476,7 @@ _SOKOL_PRIVATE void _sg_buffer_common_init(_sg_buffer_common_t* cmn, const sg_bu
     cmn->append_overflow = false;
     cmn->update_frame_index = 0;
     cmn->append_frame_index = 0;
+    cmn->map_frame_index = 0;
     cmn->num_slots = (desc->usage == SG_USAGE_IMMUTABLE) ? 1 : SG_NUM_INFLIGHT_FRAMES;
     cmn->active_slot = 0;
     cmn->type = desc->type;
@@ -5484,6 +5493,7 @@ typedef struct {
     int height;
     int num_slices;
     int num_mipmaps;
+    int64_t used_frame;
     sg_usage usage;
     sg_pixel_format pixel_format;
     int sample_count;
@@ -5513,6 +5523,7 @@ typedef struct {
     sg_wrap wrap_w;
     float min_lod;
     float max_lod;
+    int64_t used_frame;
     sg_border_color border_color;
     sg_compare_func compare;
     uint32_t max_anisotropy;
@@ -5568,6 +5579,7 @@ typedef struct {
 typedef struct {
     uint32_t required_bindings_and_uniforms;
     bool is_compute;
+    int64_t used_frame;
     _sg_shader_attr_t attrs[SG_MAX_VERTEX_ATTRIBUTES];
     _sg_shader_uniform_block_t uniform_blocks[SG_MAX_UNIFORMBLOCK_BINDSLOTS];
     _sg_shader_storage_buffer_t storage_buffers[SG_MAX_STORAGEBUFFER_BINDSLOTS];
@@ -5651,6 +5663,7 @@ typedef struct {
     sg_cull_mode cull_mode;
     sg_face_winding face_winding;
     int sample_count;
+    int64_t used_frame;
     sg_color blend_color;
     bool alpha_to_coverage_enabled;
 } _sg_pipeline_common_t;
@@ -5701,6 +5714,7 @@ typedef struct {
     int width;
     int height;
     int num_colors;
+    int64_t used_frame;
     _sg_attachment_common_t colors[SG_MAX_COLOR_ATTACHMENTS];
     _sg_attachment_common_t resolves[SG_MAX_COLOR_ATTACHMENTS];
     _sg_attachment_common_t depth_stencil;
@@ -18831,6 +18845,7 @@ _SOKOL_PRIVATE bool _sg_validate_update_buffer(const _sg_buffer_t* buf, const sg
         _SG_VALIDATE(buf->cmn.size >= (int)data->size, VALIDATE_UPDATEBUF_SIZE);
         _SG_VALIDATE(buf->cmn.update_frame_index != _sg.frame_index, VALIDATE_UPDATEBUF_ONCE);
         _SG_VALIDATE(buf->cmn.append_frame_index != _sg.frame_index, VALIDATE_UPDATEBUF_APPEND);
+        _SG_VALIDATE(buf->cmn.map_frame_index != _sg.frame_index, VALIDATE_UPDATEBUF_APPEND);
         return _sg_validate_end();
     #endif
 }
@@ -20503,6 +20518,7 @@ SOKOL_API_IMPL void sg_update_buffer(sg_buffer buf_id, const sg_range* data) {
             SOKOL_ASSERT(buf->cmn.update_frame_index != _sg.frame_index);
             // update and append on same buffer in same frame not allowed
             SOKOL_ASSERT(buf->cmn.append_frame_index != _sg.frame_index);
+            SOKOL_ASSERT(buf->cmn.map_frame_index != _sg.frame_index);
             _sg_update_buffer(buf, data);
             buf->cmn.update_frame_index = _sg.frame_index;
         }
@@ -21484,5 +21500,53 @@ SOKOL_API_IMPL sg_gl_attachments_info sg_gl_query_attachments_info(sg_attachment
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
+
+SOKOL_API_IMPL void sg_set_buffer_used_frame(uint32_t buff_id, int64_t used_frame) {
+    _sg_buffer_t* _buff = _sg_lookup_buffer(&_sg.pools, buff_id);
+    _buff->cmn.used_frame = used_frame;
+}
+
+SOKOL_API_IMPL void sg_set_image_used_frame(uint32_t img_id, int64_t used_frame) {
+    _sg_image_t* _img = _sg_lookup_image(&_sg.pools, img_id);
+    _img->cmn.used_frame = used_frame;
+}
+
+SOKOL_API_IMPL void sg_set_pipeline_used_frame(uint32_t pip_id, int64_t used_frame) {
+    _sg_pipeline_t* _pip = _sg_lookup_pipeline(&_sg.pools, pip_id);
+    _pip->cmn.used_frame = used_frame;
+}
+
+SOKOL_API_IMPL void sg_map_buffer(sg_buffer buf_id, int offset, const void* data, int num_bytes)
+{
+    _sg_buffer_t* buf = _sg_lookup_buffer(&_sg.pools, buf_id.id);
+    if (buf) {
+        /* rewind append cursor in a new frame */
+        if (buf->cmn.map_frame_index != _sg.frame_index) {
+            buf->cmn.append_pos = 0;
+            buf->cmn.append_overflow = false;
+        }
+
+        if ((offset + num_bytes) > buf->cmn.size) {
+            buf->cmn.append_overflow = true;
+        }
+
+        if (buf->slot.state == SG_RESOURCESTATE_VALID) {
+            buf->cmn.append_pos = offset;    // alter append_pos, so we write at offset
+            if (_sg_validate_append_buffer(buf, &SG_RANGE(data))) {
+                if (!buf->cmn.append_overflow && (num_bytes > 0)) {
+                    /* update and append and map on same buffer in same frame not allowed */
+                    SOKOL_ASSERT(buf->cmn.update_frame_index != _sg.frame_index);
+                    SOKOL_ASSERT(buf->cmn.append_frame_index != _sg.frame_index);
+                    _sg_append_buffer(buf, &SG_RANGE(data),
+                                      buf->cmn.map_frame_index != _sg.frame_index);
+                    buf->cmn.map_frame_index = _sg.frame_index;
+                }
+            }
+        }
+    } else {
+        /* sx_assertf(0, "invalid buf_id"); */
+        SOKOL_ASSERT(0);
+    }
+}
 
 #endif // SOKOL_GFX_IMPL
